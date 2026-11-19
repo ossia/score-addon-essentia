@@ -9,30 +9,40 @@ REVISION = "23ae7baddecfc3227ba23ad69fa11f73ac5293a4"
 PATCH_LEVEL = 1
 
 
+def apply_patches(git, source, patches):
+    command = [git, "apply", "--whitespace=nowarn"]
+    pending = []
+    for patch in patches:
+        check = subprocess.run(command + ["--check", str(patch)], cwd=source,
+                               text=True, capture_output=True)
+        if check.returncode == 0:
+            pending.append(str(patch))
+            continue
+        reverse = subprocess.run(command + ["--reverse", "--check", str(patch)],
+                                 cwd=source, text=True, capture_output=True)
+        if reverse.returncode != 0:
+            raise SystemExit(f"Essentia differs from {patch.name}; refusing a partial patch.\n"
+                             + check.stderr + reverse.stderr)
+    if pending:
+        subprocess.run(command + pending, cwd=source, check=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("--git", default="git")
     args = parser.parse_args()
     source = args.source.resolve()
-    patch = Path(__file__).with_name("essentia-safety.patch").resolve()
+    safety = Path(__file__).with_name("essentia-safety.patch").resolve()
+    portability = safety.with_name("essentia-portability.patch")
     if (source / ".git").exists():
         revision = subprocess.check_output(
             [args.git, "rev-parse", "HEAD"], cwd=source, text=True).strip()
         if revision != REVISION:
             raise SystemExit(f"Expected Essentia {REVISION}, found {revision}")
-    command = [args.git, "apply", "--whitespace=nowarn"]
-    check = subprocess.run(command + ["--check", str(patch)], cwd=source,
-                           text=True, capture_output=True)
-    if check.returncode == 0:
-        subprocess.run(command + [str(patch)], cwd=source, check=True)
-    else:
-        reverse = subprocess.run(command + ["--reverse", "--check", str(patch)],
-                                 cwd=source, text=True, capture_output=True)
-        if reverse.returncode != 0:
-            raise SystemExit("Essentia differs from the reviewed source; refusing a partial patch.\n"
-                             + check.stderr + reverse.stderr)
-    digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+    apply_patches(args.git, source, (safety, portability))
+    # Keep the installed library contract tied to the reviewed DSP safety fixes.
+    digest = hashlib.sha256(safety.read_bytes()).hexdigest()
     header = source / "src/essentia/score_essentia_patch_level.h"
     content = ("#pragma once\n"
                f"#define SCORE_ESSENTIA_PATCH_LEVEL {PATCH_LEVEL}\n"
@@ -40,7 +50,6 @@ def main():
                f'#define SCORE_ESSENTIA_PATCH_SHA256 "{digest}"\n')
     if not header.exists() or header.read_text() != content:
         header.write_text(content)
-    print(f"Essentia {REVISION}: score patch level {PATCH_LEVEL} ({digest[:12]})")
 
 
 if __name__ == "__main__":

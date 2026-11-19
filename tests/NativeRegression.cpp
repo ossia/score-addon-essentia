@@ -22,7 +22,7 @@ void require(bool condition, const char* message)
   if(!condition)
     throw std::runtime_error(message);
 }
-bool near(double a, double b, double tolerance = 1e-5)
+bool approximatelyEqual(double a, double b, double tolerance = 1e-5)
 {
   return std::isfinite(a) && std::isfinite(b) && std::abs(a - b) <= tolerance;
 }
@@ -63,7 +63,7 @@ void welchEnergy()
     welch->output("psd").set(psd);
     welch->compute();
     const double power = std::accumulate(psd.begin(), psd.end(), 0.) * 48000. / fftSize;
-    require(near(power, 1., 2e-5), "zero padding changed integrated Welch power");
+    require(approximatelyEqual(power, 1., 2e-5), "zero padding changed integrated Welch power");
   }
 }
 
@@ -87,7 +87,7 @@ void barkCompression()
   require(linear.size() == compressed.size(), "Bark compression changed the band count");
   for(std::size_t i = 0; i < linear.size(); ++i)
     require(
-        near(compressed[i], std::log2(1. + linear[i])),
+        approximatelyEqual(compressed[i], std::log2(1. + linear[i])),
         "Bark compression was applied before band accumulation completed");
 }
 
@@ -131,7 +131,8 @@ void weightingIsolation()
   (void)pitch(spectrum, "A", 48000);
   const auto after = pitch(spectrum, "Z", 48000);
   require(
-      near(before.first, after.first) && near(before.second, after.second),
+      approximatelyEqual(before.first, after.first)
+          && approximatelyEqual(before.second, after.second),
       "one YinFFT instance changed another instance's Z weighting");
 }
 void highRatePitch()
@@ -221,8 +222,8 @@ void gapChronology()
       observedStarts.size() == 1 && observedEnds.size() == 1,
       "an earlier rising flank consumed a later gap candidate");
   require(
-      near(observedStarts[0], 1400. / 48000., 1. / 48000.)
-          && near(observedEnds[0], 2200. / 48000., 1. / 48000.),
+      approximatelyEqual(observedStarts[0], 1400. / 48000., 1. / 48000.)
+          && approximatelyEqual(observedEnds[0], 2200. / 48000., 1. / 48000.),
       "gap endpoints are not in source time");
 }
 
@@ -254,8 +255,8 @@ void gapPostContext()
       observedStarts.size() == 1 && observedEnds.size() == 1,
       "samples beyond the configured post-context changed gap acceptance");
   require(
-      near(observedStarts[0], 800. / 48000., 1. / 48000.)
-          && near(observedEnds[0], 1400. / 48000., 1. / 48000.),
+      approximatelyEqual(observedStarts[0], 800. / 48000., 1. / 48000.)
+          && approximatelyEqual(observedEnds[0], 1400. / 48000., 1. / 48000.),
       "post-context changed gap endpoints");
 }
 
