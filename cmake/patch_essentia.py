@@ -35,13 +35,14 @@ def main():
     source = args.source.resolve()
     safety = Path(__file__).with_name("essentia-safety.patch").resolve()
     portability = safety.with_name("essentia-portability.patch")
+    fft = safety.with_name("essentia-ossia-fft.patch")
     if (source / ".git").exists():
         revision = subprocess.check_output(
             [args.git, "rev-parse", "HEAD"], cwd=source, text=True).strip()
         if revision != REVISION:
             raise SystemExit(f"Expected Essentia {REVISION}, found {revision}")
-    apply_patches(args.git, source, (safety, portability))
-    # Keep the installed library contract tied to the reviewed DSP safety fixes.
+    apply_patches(args.git, source, (safety, portability, fft))
+    # Keep the patch-level stamp tied to the reviewed DSP safety fixes.
     digest = hashlib.sha256(safety.read_bytes()).hexdigest()
     header = source / "src/essentia/score_essentia_patch_level.h"
     content = ("#pragma once\n"

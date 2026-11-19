@@ -1,0 +1,618 @@
+diff --git a/src/algorithms/standard/fftw.cpp b/src/algorithms/standard/fftw.cpp
+index 33e28616..3acce8b5 100644
+--- a/src/algorithms/standard/fftw.cpp
++++ b/src/algorithms/standard/fftw.cpp
+@@ -18,7 +18,6 @@
+  */
+ 
+ #include "fftw.h"
+-#include "essentia.h"
+ 
+ using namespace std;
+ using namespace essentia;
+@@ -35,74 +34,30 @@ const char* FFTW::description = DOC("This algorithm computes the positive comple
+ "  [2] Fast Fourier Transform -- from Wolfram MathWorld,\n"
+ "  http://mathworld.wolfram.com/FastFourierTransform.html");
+ 
+-ForcedMutex FFTW::globalFFTWMutex;
+-
+-FFTW::~FFTW() {
+-  ForcedMutexLocker lock(globalFFTWMutex);
+-
+-  // we might have called essentia::shutdown() before this algorithm goes out
+-  // of scope, so make sure we're not doing stupid things here
+-  // This will cause a memory leak then, but it is definitely a better choice
+-  // than a crash (right, right??? :-) )
+-  if (essentia::isInitialized()) {
+-    fftwf_destroy_plan(_fftPlan);
+-    fftwf_free(_input);
+-    fftwf_free(_output);
+-  }
+-}
+-
+ void FFTW::compute() {
+-
+-  const std::vector<Real>& signal = _signal.get();
+-  std::vector<std::complex<Real> >& fft = _fft.get();
+-
+-  // check if input is OK
+-  int size = int(signal.size());
++  const auto& signal = _signal.get();
++  auto& fft = _fft.get();
++  const auto size = signal.size();
+   if (size == 0) {
+     throw EssentiaException("FFT: Input size cannot be 0");
+   }
+ 
+-  if ((_fftPlan == 0) ||
+-      ((_fftPlan != 0) && _fftPlanSize != size)) {
+-    createFFTObject(size);
+-  }
+-
+-  // copy input into plan
+-  memcpy(_input, &signal[0], size*sizeof(Real));
+-
+-  // calculate the fft
+-  fftwf_execute(_fftPlan);
+-
+-  // copy result from plan to output vector
+-  fft.resize(size/2+1);
+-  memcpy(&fft[0], _output, (size/2+1)*sizeof(complex<Real>));
+-
++  ensureFFTObject(size);
++  fft.resize(size / 2 + 1);
++  _fftPlan->execute(signal, fft);
+ }
+ 
+ void FFTW::configure() {
+-  createFFTObject(parameter("size").toInt());
++  ensureFFTObject(parameter("size").toInt());
+ }
+ 
+-void FFTW::createFFTObject(int size) {
+-  ForcedMutexLocker lock(globalFFTWMutex);
+-
+-  // This is only needed because at the moment we return half of the spectrum,
+-  // which means that there are 2 different input signals that could yield the
+-  // same FFT...
++void FFTW::ensureFFTObject(std::size_t size) {
++  // The half-spectrum does not encode whether the original length was odd.
+   if (size % 2 == 1) {
+     throw EssentiaException("FFT: can only compute FFT of arrays which have an even size");
+   }
+-
+-  // create the temporary storage array
+-  fftwf_free(_input);
+-  fftwf_free(_output);
+-  _input = (Real*)fftwf_malloc(sizeof(Real)*size);
+-  _output = (complex<Real>*)fftwf_malloc(sizeof(complex<Real>)*size);
+-
+-  if (_fftPlan != 0) {
+-    fftwf_destroy_plan(_fftPlan);
++  if (!_fftPlan || _fftPlanSize != size) {
++    _fftPlan.emplace(size, ossia::exact_fft::kind::real_forward);
++    _fftPlanSize = size;
+   }
+-
+-  _fftPlan = fftwf_plan_dft_r2c_1d(size, _input, (fftwf_complex*)_output, FFTW_ESTIMATE);
+-  _fftPlanSize = size;
+ }
+diff --git a/src/algorithms/standard/fftw.h b/src/algorithms/standard/fftw.h
+index 3aedcc23..09bdeb62 100644
+--- a/src/algorithms/standard/fftw.h
++++ b/src/algorithms/standard/fftw.h
+@@ -21,9 +21,9 @@
+ #define ESSENTIA_FFTW_H
+ 
+ #include "algorithm.h"
+-#include "threading.h"
++#include <ossia/audio/fft.hpp>
+ #include <complex>
+-#include <fftw3.h>
++#include <optional>
+ 
+ namespace essentia {
+ namespace standard {
+@@ -35,13 +35,11 @@ class FFTW : public Algorithm {
+   Output<std::vector<std::complex<Real> > > _fft;
+ 
+  public:
+-  FFTW() : _fftPlan(0), _input(0), _output(0) {
++  FFTW() {
+     declareInput(_signal, "frame", "the input audio frame");
+     declareOutput(_fft, "fft", "the FFT of the input frame");
+   }
+ 
+-  ~FFTW();
+-
+   void declareParameters() {
+     declareParameter("size", "the expected size of the input frame. This is purely optional and only targeted at optimizing the creation time of the FFT object", "[1,inf)", 1024);
+   }
+@@ -54,17 +52,10 @@ class FFTW : public Algorithm {
+   static const char* description;
+ 
+  protected:
+-  friend class IFFTW;
+-  friend class FFTWComplex;
+-  friend class IFFTWComplex;
+-  static ForcedMutex globalFFTWMutex;
+-
+-  fftwf_plan _fftPlan;
+-  int _fftPlanSize;
+-  Real* _input;
+-  std::complex<Real>* _output;
++  std::optional<ossia::exact_fft> _fftPlan;
++  std::size_t _fftPlanSize = 0;
+ 
+-  void createFFTObject(int size);
++  void ensureFFTObject(std::size_t size);
+ };
+ 
+ } // namespace standard
+diff --git a/src/algorithms/standard/fftwcomplex.cpp b/src/algorithms/standard/fftwcomplex.cpp
+index c8656bbd..02366c30 100644
+--- a/src/algorithms/standard/fftwcomplex.cpp
++++ b/src/algorithms/standard/fftwcomplex.cpp
+@@ -18,8 +18,6 @@
+  */
+ 
+ #include "fftwcomplex.h"
+-#include "fftw.h"
+-#include "essentia.h"
+ 
+ using namespace std;
+ using namespace essentia;
+@@ -27,7 +25,7 @@ using namespace standard;
+ 
+ const char* FFTWComplex::name = "FFTC";
+ const char* FFTWComplex::category = "Standard";
+-const char* FFTWComplex::description = DOC("This algorithm computes the complex short-term Fourier transform (STFT) of a complex array using the FFT algorithm. If the `negativeFrequencies` flag is set on, the resulting fft has a size of (s/2)+1, where s is the size of the input frame. Otherwise, output matches the input size.\n"
++const char* FFTWComplex::description = DOC("This algorithm computes the complex short-term Fourier transform (STFT) of a complex array using the FFT algorithm. If the `negativeFrequencies` flag is off, the resulting fft has a size of (s/2)+1, where s is the size of the input frame. Otherwise, output matches the input size.\n"
+ "At the moment FFT can only be computed on frames which size is even and non zero, otherwise an exception is thrown.\n"
+ "\n"
+ "References:\n"
+@@ -36,79 +34,38 @@ const char* FFTWComplex::description = DOC("This algorithm computes the complex
+ "  [2] Fast Fourier Transform -- from Wolfram MathWorld,\n"
+ "  http://mathworld.wolfram.com/FastFourierTransform.html");
+ 
+-
+-FFTWComplex::~FFTWComplex() {
+-  ForcedMutexLocker lock(FFTW::globalFFTWMutex);
+-
+-  // we might have called essentia::shutdown() before this algorithm goes out
+-  // of scope, so make sure we're not doing stupid things here
+-  // This will cause a memory leak then, but it is definitely a better choice
+-  // than a crash (right, right??? :-) )
+-  if (essentia::isInitialized()) {
+-    fftwf_destroy_plan(_fftPlan);
+-    fftwf_free(_input);
+-    fftwf_free(_output);
+-  }
+-}
+-
+ void FFTWComplex::compute() {
+-
+-  const std::vector<std::complex<Real> >& signal = _signal.get();
+-  std::vector<std::complex<Real> >& fft = _fft.get();
+-
+-  // check if input is OK
+-  int size = int(signal.size());
++  const auto& signal = _signal.get();
++  auto& fft = _fft.get();
++  const auto size = signal.size();
+   if (size == 0) {
+     throw EssentiaException("FFT: Input size cannot be 0");
+   }
+ 
+-  if ((_fftPlan == 0) ||
+-      ((_fftPlan != 0) && _fftPlanSize != size)) {
+-    createFFTObject(size);
++  ensureFFTObject(size);
++  const auto bins = _negativeFrequencies ? size : size / 2 + 1;
++  if (&signal == &fft) {
++    // The full input is still needed if the output overwrites a prefix of it.
++    _fftPlan->execute(signal, std::span{fft}.first(bins));
++    fft.resize(bins);
+   }
+-
+-  // copy input into plan
+-  memcpy(_input, &signal[0], size*sizeof(complex<Real>));
+-
+-  // calculate the fft
+-  fftwf_execute(_fftPlan);
+-
+-  // copy result from plan to output vector
+-  if (_negativeFrequencies){
+-    fft.resize(size);
+-    memcpy(&fft[0], _output, (size)*sizeof(complex<Real>));
+-  }
+-  else{
+-    fft.resize(size/2+1);
+-    memcpy(&fft[0], _output, (size/2+1)*sizeof(complex<Real>));
++  else {
++    fft.resize(bins);
++    _fftPlan->execute(signal, fft);
+   }
+ }
+ 
+ void FFTWComplex::configure() {
+-  createFFTObject(parameter("size").toInt());
++  ensureFFTObject(parameter("size").toInt());
+   _negativeFrequencies = parameter("negativeFrequencies").toBool();
+ }
+ 
+-void FFTWComplex::createFFTObject(int size) {
+-  ForcedMutexLocker lock(FFTW::globalFFTWMutex);
+-
+-  // This is only needed because at the moment we return half of the spectrum,
+-  // which means that there are 2 different input signals that could yield the
+-  // same FFT...
++void FFTWComplex::ensureFFTObject(std::size_t size) {
+   if (size % 2 == 1) {
+     throw EssentiaException("FFT: can only compute FFT of arrays which have an even size");
+   }
+-
+-  // create the temporary storage array
+-  fftwf_free(_input);
+-  fftwf_free(_output);
+-  _input = (complex<Real>*)fftwf_malloc(sizeof(complex<Real>)*size);
+-  _output = (complex<Real>*)fftwf_malloc(sizeof(complex<Real>)*size);
+-
+-  if (_fftPlan != 0) {
+-    fftwf_destroy_plan(_fftPlan);
++  if (!_fftPlan || _fftPlanSize != size) {
++    _fftPlan.emplace(size, ossia::exact_fft::kind::complex_forward);
++    _fftPlanSize = size;
+   }
+-
+-  _fftPlan = fftwf_plan_dft_1d(size, (fftwf_complex*)_input, (fftwf_complex*)_output, FFTW_FORWARD, FFTW_ESTIMATE);
+-  _fftPlanSize = size;
+ }
+diff --git a/src/algorithms/standard/fftwcomplex.h b/src/algorithms/standard/fftwcomplex.h
+index e2fa3ed5..d7e9839d 100644
+--- a/src/algorithms/standard/fftwcomplex.h
++++ b/src/algorithms/standard/fftwcomplex.h
+@@ -21,9 +21,9 @@
+ #define ESSENTIA_FFTWCOMPLEX_H
+ 
+ #include "algorithm.h"
+-#include "threading.h"
++#include <ossia/audio/fft.hpp>
+ #include <complex>
+-#include <fftw3.h>
++#include <optional>
+ 
+ namespace essentia {
+ namespace standard {
+@@ -35,13 +35,11 @@ class FFTWComplex : public Algorithm {
+   Output<std::vector<std::complex<Real> > > _fft;
+ 
+  public:
+-  FFTWComplex() : _fftPlan(0), _input(0), _output(0) {
++  FFTWComplex() {
+     declareInput(_signal, "frame", "the input frame (complex)");
+     declareOutput(_fft, "fft", "the FFT of the input frame");
+   }
+ 
+-  ~FFTWComplex();
+-
+   void declareParameters() {
+     declareParameter("size", "the expected size of the input frame. This is purely optional and only targeted at optimizing the creation time of the FFT object", "[1,inf)", 1024);
+     declareParameter("negativeFrequencies", "returns the full spectrum or just the positive frequencies", "{true,false}", false);
+@@ -56,14 +54,12 @@ class FFTWComplex : public Algorithm {
+   static const char* description;
+ 
+  protected:
+-  fftwf_plan _fftPlan;
+-  int _fftPlanSize;
+-  std::complex<Real>* _input;
+-  std::complex<Real>* _output;
++  std::optional<ossia::exact_fft> _fftPlan;
++  std::size_t _fftPlanSize = 0;
+ 
+-  bool _negativeFrequencies;
++  bool _negativeFrequencies = false;
+ 
+-  void createFFTObject(int size);
++  void ensureFFTObject(std::size_t size);
+ };
+ 
+ } // namespace standard
+diff --git a/src/algorithms/standard/ifftw.cpp b/src/algorithms/standard/ifftw.cpp
+index b7abb40d..60bd0fd8 100644
+--- a/src/algorithms/standard/ifftw.cpp
++++ b/src/algorithms/standard/ifftw.cpp
+@@ -18,7 +18,6 @@
+  */
+ 
+ #include "ifftw.h"
+-#include "fftw.h"
+ 
+ using namespace std;
+ using namespace essentia;
+@@ -36,69 +35,27 @@ const char* IFFTW::description = DOC("This algorithm calculates the inverse shor
+ "  [2] Fast Fourier Transform -- from Wolfram MathWorld,\n"
+ "  http://mathworld.wolfram.com/FastFourierTransform.html");
+ 
+-
+-IFFTW::~IFFTW() {
+-  ForcedMutexLocker lock(FFTW::globalFFTWMutex);
+-
+-  fftwf_destroy_plan(_fftPlan);
+-  fftwf_free(_input);
+-  fftwf_free(_output);
+-}
+-
+ void IFFTW::compute() {
+-
+-  const std::vector<std::complex<Real> >& fft = _fft.get();
+-  std::vector<Real>& signal = _signal.get();
+-
+-  // check if input is OK
+-  int size = ((int)fft.size()-1)*2;
+-  if (size <= 0) {
++  const auto& fft = _fft.get();
++  auto& signal = _signal.get();
++  if (fft.size() < 2) {
+     throw EssentiaException("IFFT: Input size cannot be 0 or 1");
+   }
+-  if ((_fftPlan == 0) ||
+-      ((_fftPlan != 0) && _fftPlanSize != size)) {
+-    createFFTObject(size);
+-  }
+-
+-  // copy input into plan
+-  memcpy(_input, &fft[0], (size/2+1)*sizeof(complex<Real>));
+ 
+-  // calculate the fft
+-  fftwf_execute(_fftPlan);
+-
+-  // copy result from plan to output vector
++  const auto size = (fft.size() - 1) * 2;
++  ensureFFTObject(size);
+   signal.resize(size);
+-  memcpy(&signal[0], _output, size*sizeof(Real));
+-
+-  if (_normalize) {
+-    Real norm = (Real)size;
+-    
+-    for (int i = 0; i < size; i++) {
+-      signal[i] /= norm;
+-    }
+-  }
++  _fftPlan->execute(fft, signal, _normalize ? Real(1) / Real(size) : Real(1));
+ }
+ 
+ void IFFTW::configure() {
+-  createFFTObject(parameter("size").toInt());
++  ensureFFTObject(parameter("size").toInt());
+   _normalize = parameter("normalize").toBool();
+ }
+ 
+-void IFFTW::createFFTObject(int size) {
+-  ForcedMutexLocker lock(FFTW::globalFFTWMutex);
+-
+-  // create the temporary storage array
+-  fftwf_free(_input);
+-  fftwf_free(_output);
+-  _input = (complex<Real>*)fftwf_malloc(sizeof(complex<Real>)*size);
+-  _output = (Real*)fftwf_malloc(sizeof(Real)*size);
+-
+-  if (_fftPlan != 0) {
+-    fftwf_destroy_plan(_fftPlan);
++void IFFTW::ensureFFTObject(std::size_t size) {
++  if (!_fftPlan || _fftPlanSize != size) {
++    _fftPlan.emplace(size, ossia::exact_fft::kind::real_inverse);
++    _fftPlanSize = size;
+   }
+-
+-  //_fftPlan = fftwf_plan_dft_c2r_1d(size, (fftwf_complex*)_input, _output, FFTW_MEASURE);
+-  _fftPlan = fftwf_plan_dft_c2r_1d(size, (fftwf_complex*)_input, _output, FFTW_ESTIMATE);
+-  _fftPlanSize = size;
+-
+ }
+diff --git a/src/algorithms/standard/ifftw.h b/src/algorithms/standard/ifftw.h
+index 8ff0cc9e..d545c6c2 100644
+--- a/src/algorithms/standard/ifftw.h
++++ b/src/algorithms/standard/ifftw.h
+@@ -21,9 +21,9 @@
+ #define ESSENTIA_IFFTW_H
+ 
+ #include "algorithm.h"
+-#include "threading.h"
++#include <ossia/audio/fft.hpp>
+ #include <complex>
+-#include <fftw3.h>
++#include <optional>
+ 
+ namespace essentia {
+ namespace standard {
+@@ -35,13 +35,11 @@ class IFFTW : public Algorithm {
+   Output<std::vector<Real> > _signal;
+ 
+  public:
+-  IFFTW() : _fftPlan(0), _input(0), _output(0) {
++  IFFTW() {
+     declareInput(_fft, "fft", "the input frame");
+     declareOutput(_signal, "frame", "the IFFT of the input frame");
+   }
+ 
+-  ~IFFTW();
+-
+   void declareParameters() {
+     declareParameter("size", "the expected size of the input frame. This is purely optional and only targeted at optimizing the creation time of the FFT object", "[1,inf)", 1024);
+     declareParameter("normalize", "whether to normalize the output by the FFT length.", "{true,false}", true);
+@@ -56,13 +54,11 @@ class IFFTW : public Algorithm {
+   static const char* description;
+ 
+  protected:
+-  fftwf_plan _fftPlan;
+-  int _fftPlanSize;
+-  std::complex<Real>* _input;
+-  Real* _output;
+-  bool _normalize;
++  std::optional<ossia::exact_fft> _fftPlan;
++  std::size_t _fftPlanSize = 0;
++  bool _normalize = true;
+ 
+-  void createFFTObject(int size);
++  void ensureFFTObject(std::size_t size);
+ };
+ 
+ } // namespace standard
+diff --git a/src/algorithms/standard/ifftwcomplex.cpp b/src/algorithms/standard/ifftwcomplex.cpp
+index 364305d9..b78fb380 100644
+--- a/src/algorithms/standard/ifftwcomplex.cpp
++++ b/src/algorithms/standard/ifftwcomplex.cpp
+@@ -18,7 +18,6 @@
+  */
+ 
+ #include "ifftwcomplex.h"
+-#include "fftw.h"
+ 
+ using namespace std;
+ using namespace essentia;
+@@ -26,9 +25,9 @@ using namespace standard;
+ 
+ const char* IFFTWComplex::name = "IFFTC";
+ const char* IFFTWComplex::category = "Standard";
+-const char* IFFTWComplex::description = DOC("This algorithm calculates the inverse short-term Fourier transform (STFT) of an array of complex values using the FFT algorithm. The resulting frame has a size equal to the input fft frame size. The inverse Fourier transform is not defined for frames which size is less than 2 samples. Otherwise an exception is thrown.\n"
++const char* IFFTWComplex::description = DOC("This algorithm calculates the inverse short-term Fourier transform (STFT) of an array of complex values using the FFT algorithm. The resulting frame has a size equal to the input fft frame size.\n"
+ "\n"
+-"An exception is thrown if the input's size is not larger than 1.\n"
++"An exception is thrown if the input is empty.\n"
+ "\n"
+ "References:\n"
+ "  [1] Fast Fourier transform - Wikipedia, the free encyclopedia,\n"
+@@ -36,70 +35,28 @@ const char* IFFTWComplex::description = DOC("This algorithm calculates the inver
+ "  [2] Fast Fourier Transform -- from Wolfram MathWorld,\n"
+ "  http://mathworld.wolfram.com/FastFourierTransform.html");
+ 
+-
+-IFFTWComplex::~IFFTWComplex() {
+-  ForcedMutexLocker lock(FFTW::globalFFTWMutex);
+-
+-  fftwf_destroy_plan(_fftPlan);
+-  fftwf_free(_input);
+-  fftwf_free(_output);
+-}
+-
+ void IFFTWComplex::compute() {
+-
+-  const std::vector<std::complex<Real> >& fft = _fft.get();
+-  std::vector<std::complex<Real> >& signal = _signal.get();
+-
+-  // check if input is OK
+-  int size = (int)fft.size();
+-  if (size <= 0) {
+-    throw EssentiaException("IFFTComplex: Input size cannot be 0 or 1");
++  const auto& fft = _fft.get();
++  auto& signal = _signal.get();
++  const auto size = fft.size();
++  if (size == 0) {
++    throw EssentiaException("IFFTComplex: Input size cannot be 0");
+   }
+-  if ((_fftPlan == 0) ||
+-      ((_fftPlan != 0) && _fftPlanSize != size)) {
+-    createFFTObject(size);
+-  }
+-
+-  // copy input into plan
+-  memcpy(_input, &fft[0], size*sizeof(complex<Real>));
+ 
+-  // calculate the fft
+-  fftwf_execute(_fftPlan);
+-
+-  // copy result from plan to output vector
++  ensureFFTObject(size);
+   signal.resize(size);
+-  memcpy(&signal[0], _output, size*sizeof(complex<Real>));
+-
+-  if (_normalize) {
+-    Real norm = (Real)size;
+-    
+-    for (int i = 0; i < size; i++) {
+-      signal[i] /= norm;
+-    }
+-  }
++  _fftPlan->execute(fft, signal, _normalize ? Real(1) / Real(size) : Real(1));
+ }
+ 
+ void IFFTWComplex::configure() {
+-  createFFTObject(parameter("size").toInt());
++  ensureFFTObject(parameter("size").toInt());
+   _normalize = parameter("normalize").toBool();
+ }
+ 
+-void IFFTWComplex::createFFTObject(int size) {
+-  ForcedMutexLocker lock(FFTW::globalFFTWMutex);
+-
+-  // create the temporary storage array
+-  fftwf_free(_input);
+-  fftwf_free(_output);
+-  _input = (complex<Real>*)fftwf_malloc(sizeof(complex<Real>)*size);
+-  _output = (complex<Real>*)fftwf_malloc(sizeof(complex<Real>)*size);
+-
+-  if (_fftPlan != 0) {
+-    fftwf_destroy_plan(_fftPlan);
++void IFFTWComplex::ensureFFTObject(std::size_t size) {
++  if (!_fftPlan || _fftPlanSize != size) {
++    _fftPlan.emplace(size, ossia::exact_fft::kind::complex_inverse);
++    _fftPlanSize = size;
+   }
+-
+-  //_fftPlan = fftwf_plan_dft_c2r_1d(size, (fftwf_complex*)_input, _output, FFTW_MEASURE);
+-  _fftPlan = fftwf_plan_dft_1d(size, (fftwf_complex*)_input, (fftwf_complex*)_output, FFTW_BACKWARD, FFTW_ESTIMATE);
+-  _fftPlanSize = size;
+-
+ }
+ 
+diff --git a/src/algorithms/standard/ifftwcomplex.h b/src/algorithms/standard/ifftwcomplex.h
+index b7683381..21d10dea 100644
+--- a/src/algorithms/standard/ifftwcomplex.h
++++ b/src/algorithms/standard/ifftwcomplex.h
+@@ -21,9 +21,9 @@
+ #define ESSENTIA_IFFTWCOMPLEX_H
+ 
+ #include "algorithm.h"
+-#include "threading.h"
++#include <ossia/audio/fft.hpp>
+ #include <complex>
+-#include <fftw3.h>
++#include <optional>
+ 
+ namespace essentia {
+ namespace standard {
+@@ -36,13 +36,11 @@ class IFFTWComplex : public Algorithm {
+ 
+  public:
+ 
+-  IFFTWComplex() : _fftPlan(0), _input(0), _output(0) {
++  IFFTWComplex() {
+     declareInput(_fft, "fft", "the input frame");
+     declareOutput(_signal, "frame", "the complex IFFT of the input frame");
+   }
+ 
+-  ~IFFTWComplex();
+-
+   void declareParameters() {
+     declareParameter("size", "the expected size of the input frame. This is purely optional and only targeted at optimizing the creation time of the FFT object", "[1,inf)", 1024);
+     declareParameter("normalize", "whether to normalize the output by the FFT length.", "{true,false}", true);
+@@ -57,13 +55,11 @@ class IFFTWComplex : public Algorithm {
+   static const char* description;
+ 
+  protected:
+-  fftwf_plan _fftPlan;
+-  int _fftPlanSize;
+-  std::complex<Real>* _input;
+-  std::complex<Real>* _output;
+-  bool _normalize;
++  std::optional<ossia::exact_fft> _fftPlan;
++  std::size_t _fftPlanSize = 0;
++  bool _normalize = true;
+ 
+-  void createFFTObject(int size);
++  void ensureFFTObject(std::size_t size);
+ };
+ 
+ } // namespace standard

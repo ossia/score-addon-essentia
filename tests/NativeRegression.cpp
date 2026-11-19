@@ -4,9 +4,11 @@
 #include <cmath>
 
 #include <algorithm>
+#include <complex>
 #include <iostream>
 #include <memory>
 #include <numeric>
+#include <numbers>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -25,6 +27,118 @@ void require(bool condition, const char* message)
 bool approximatelyEqual(double a, double b, double tolerance = 1e-5)
 {
   return std::isfinite(a) && std::isfinite(b) && std::abs(a - b) <= tolerance;
+}
+
+void requireFFTRejection(const Algorithm& algorithm)
+{
+  try
+  {
+    algorithm->compute();
+  }
+  catch(const essentia::EssentiaException&)
+  {
+    return;
+  }
+  throw std::runtime_error("FFT accepted an unsupported input length");
+}
+
+void realFFT()
+{
+  Algorithm forward{Factory::create("FFT", "size", 6)};
+  Algorithm inverse{Factory::create("IFFT", "size", 6)};
+  Algorithm rawInverse{Factory::create("IFFT", "size", 6, "normalize", false)};
+  std::vector<Real> frame, roundTrip;
+  std::vector<std::complex<Real>> spectrum;
+  forward->input("frame").set(frame);
+  forward->output("fft").set(spectrum);
+  for(auto* algorithm : {inverse.get(), rawInverse.get()})
+  {
+    algorithm->input("fft").set(spectrum);
+    algorithm->output("frame").set(roundTrip);
+  }
+
+  for(int size : {6, 10, 10})
+  {
+    frame.assign(size, 0.f);
+    frame[1] = 1.f;
+    forward->compute();
+    require(spectrum.size() == std::size_t(size / 2 + 1), "FFT padded a real frame");
+    for(std::size_t k = 0; k < spectrum.size(); ++k)
+    {
+      const auto expected = std::polar(1.f, -2.f * std::numbers::pi_v<Real> * k / size);
+      require(approximatelyEqual(std::abs(spectrum[k] - expected), 0.), "FFT bin differs");
+    }
+
+    for(auto* algorithm : {inverse.get(), rawInverse.get()})
+    {
+      algorithm->compute();
+      require(roundTrip.size() == frame.size(), "IFFT changed the real frame length");
+      const auto scale = algorithm == inverse.get() ? 1.f : Real(size);
+      for(int i = 0; i < size; ++i)
+        require(approximatelyEqual(roundTrip[i], frame[i] * scale), "IFFT scaling differs");
+    }
+  }
+
+  frame.assign(3, 0.f);
+  requireFFTRejection(forward);
+  frame.clear();
+  requireFFTRejection(forward);
+  spectrum.resize(1);
+  requireFFTRejection(inverse);
+  spectrum.clear();
+  requireFFTRejection(inverse);
+}
+
+void complexFFT()
+{
+  using Complex = std::complex<Real>;
+  constexpr int size = 6;
+  Algorithm forward{Factory::create("FFTC", "size", size, "negativeFrequencies", true)};
+  Algorithm prefix{Factory::create("FFTC", "size", size)};
+  Algorithm inverse{Factory::create("IFFTC", "size", 5)};
+  Algorithm rawInverse{Factory::create("IFFTC", "size", 5, "normalize", false)};
+  std::vector<Complex> frame(size), spectrum, inPlace, roundTrip;
+  for(int i = 0; i < size; ++i)
+    frame[i] = std::polar(1.f, 2.f * std::numbers::pi_v<Real> * (1 - i) / size);
+  forward->input("frame").set(frame);
+  forward->output("fft").set(spectrum);
+  forward->compute();
+  require(spectrum.size() == size, "FFTC padded a complex frame");
+  require(approximatelyEqual(std::abs(spectrum.back()), size), "FFTC discarded a negative bin");
+
+  inPlace = frame;
+  prefix->input("frame").set(inPlace);
+  prefix->output("fft").set(inPlace);
+  prefix->compute();
+  require(inPlace.size() == size / 2 + 1, "FFTC returned negative bins when disabled");
+  for(std::size_t k = 0; k < inPlace.size(); ++k)
+    require(approximatelyEqual(std::abs(inPlace[k] - spectrum[k]), 0.), "FFTC in-place prefix differs");
+
+  for(auto* algorithm : {inverse.get(), rawInverse.get()})
+  {
+    algorithm->input("fft").set(spectrum);
+    algorithm->output("frame").set(roundTrip);
+    for(int inverseSize : {size, 5, 1})
+    {
+      spectrum.assign(inverseSize, {});
+      spectrum.back() = 1.f;
+      algorithm->compute();
+      require(roundTrip.size() == spectrum.size(), "IFFTC changed the complex frame length");
+      const Real scale = algorithm == inverse.get() ? 1.f / inverseSize : 1.f;
+      for(int i = 0; i < inverseSize; ++i)
+      {
+        const auto expected = std::polar(scale, -2.f * std::numbers::pi_v<Real> * i / inverseSize);
+        require(approximatelyEqual(std::abs(roundTrip[i] - expected), 0.), "IFFTC scaling differs");
+      }
+    }
+  }
+
+  frame.assign(3, {});
+  requireFFTRejection(forward);
+  frame.clear();
+  requireFFTRejection(forward);
+  spectrum.clear();
+  requireFFTRejection(inverse);
 }
 
 void firstSound()
@@ -281,6 +395,8 @@ int main(int argc, char** argv)
 {
   essentia::init();
   const std::pair<const char*, void (*)()> cases[]{
+      {"real-fft", realFFT},
+      {"complex-fft", complexFFT},
       {"first-sound", firstSound},
       {"welch-energy", welchEnergy},
       {"bark-compression", barkCompression},
