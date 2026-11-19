@@ -4,133 +4,241 @@ set(SCORE_ESSENTIA_REVISION "23ae7baddecfc3227ba23ad69fa11f73ac5293a4")
 set(SCORE_ESSENTIA_ROOT "" CACHE PATH
     "Installed score-patched Essentia DSP profile; empty builds the pinned dependency")
 set(SCORE_ESSENTIA_SOURCE_DIR "" CACHE PATH
-    "Existing isolated pinned Essentia source tree to patch/build instead of downloading")
-set(SCORE_ESSENTIA_BUILD_JOBS 8 CACHE STRING "Parallel jobs for the native Essentia build")
+    "Writable staged source tree of the pinned Essentia revision; empty downloads the archive")
 
-find_package(Threads REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SCORE_ESSENTIA_FFTW REQUIRED IMPORTED_TARGET fftw3f)
-pkg_check_modules(SCORE_ESSENTIA_SRC REQUIRED IMPORTED_TARGET samplerate)
-if(NOT TARGET Eigen3::Eigen)
-  find_package(Eigen3 3.3.4 REQUIRED NO_MODULE)
-endif()
+function(_score_essentia_build_fftw)
+  include(FetchContent)
+  # Populate first so EXCLUDE_FROM_ALL also works before CMake 3.28.
+  FetchContent_Declare(score_essentia_fftw
+    URL https://fftw.org/fftw-3.3.10.tar.gz
+    URL_HASH SHA256=56c932549852cddcfafdab3820b0200c7742675be92179e59e6215b340e26467
+    DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+    SOURCE_SUBDIR score_essentia_no_cmake_project)
+  FetchContent_MakeAvailable(score_essentia_fftw)
 
-file(SHA256 "${CMAKE_CURRENT_LIST_DIR}/essentia-safety.patch" _essentia_patch_sha)
-if(SCORE_ESSENTIA_ROOT)
-  find_path(SCORE_ESSENTIA_INCLUDE_DIR algorithmfactory.h
-    PATHS "${SCORE_ESSENTIA_ROOT}/include/essentia" NO_DEFAULT_PATH NO_CACHE REQUIRED)
-  find_library(SCORE_ESSENTIA_LIBRARY NAMES "${CMAKE_STATIC_LIBRARY_PREFIX}essentia${CMAKE_STATIC_LIBRARY_SUFFIX}"
-    PATHS "${SCORE_ESSENTIA_ROOT}/lib" "${SCORE_ESSENTIA_ROOT}/lib64"
-    NO_DEFAULT_PATH NO_CACHE REQUIRED)
-  set(_essentia_patch_header "${SCORE_ESSENTIA_INCLUDE_DIR}/score_essentia_patch_level.h")
-  if(NOT EXISTS "${_essentia_patch_header}")
-    message(FATAL_ERROR
-      "SCORE_ESSENTIA_ROOT must contain the score-patched DSP profile. "
-      "Unpatched upstream has unsafe Panning/YinFFT and invalid detector state. "
-      "Clear SCORE_ESSENTIA_ROOT to build the pinned patched dependency.")
+  # FFTW's old policy baseline must honor these normal variables, not change
+  # shared cache options or inherit score's choices of libraries and tests.
+  set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+  if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM OR CMAKE_POLICY_VERSION_MINIMUM VERSION_LESS 3.13)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.13)
   endif()
-  file(READ "${_essentia_patch_header}" _essentia_patch_header_text)
-  if(NOT _essentia_patch_header_text MATCHES "SCORE_ESSENTIA_PATCH_LEVEL 1"
-     OR NOT _essentia_patch_header_text MATCHES "${SCORE_ESSENTIA_REVISION}"
-     OR NOT _essentia_patch_header_text MATCHES "${_essentia_patch_sha}")
-    message(FATAL_ERROR "Installed Essentia does not match this addon's reviewed revision and safety patch; rebuild it.")
-  endif()
-else()
-  if(CMAKE_CROSSCOMPILING OR MSVC)
-    message(FATAL_ERROR
-      "For this toolchain, provide SCORE_ESSENTIA_ROOT with the matching patched native DSP SDK. "
-      "The automatic upstream Waf build supports native Unix toolchains.")
-  endif()
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  find_package(Git REQUIRED)
-  include(ExternalProject)
-
-  # Waf requires an Eigen pkg-config entry even when score provides the headers
-  # as a CMake target. Describe the actual target, not another system Eigen ABI.
-  get_target_property(_essentia_eigen_includes Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES)
-  set(_essentia_eigen_root "")
-  foreach(_include IN LISTS _essentia_eigen_includes)
-    if(_include MATCHES "^\\$<BUILD_INTERFACE:(.*)>$")
-      set(_include "${CMAKE_MATCH_1}")
-    endif()
-    if(EXISTS "${_include}/Eigen/Core")
-      set(_essentia_eigen_root "${_include}")
-      break()
-    endif()
+  foreach(_option IN ITEMS
+      BUILD_SHARED_LIBS BUILD_TESTS ENABLE_OPENMP ENABLE_THREADS WITH_COMBINED_THREADS
+      ENABLE_LONG_DOUBLE ENABLE_QUAD_PRECISION ENABLE_SSE ENABLE_SSE2 ENABLE_AVX ENABLE_AVX2)
+    set(${_option} OFF)
   endforeach()
-  if(NOT _essentia_eigen_root)
-    message(FATAL_ERROR "Cannot resolve Eigen3::Eigen headers for Essentia's upstream build")
+  set(ENABLE_FLOAT ON)
+  set(DISABLE_FORTRAN ON)
+  # The upstream build also tests these results without checking its options.
+  set(Threads_FOUND FALSE)
+  set(OPENMP_FOUND FALSE)
+  foreach(_feature IN ITEMS THREADS OPENMP SIMD SSE SSE2 AVX AVX2 FMA)
+    set(HAVE_${_feature} FALSE)
+  endforeach()
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+  set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
+  set(CMAKE_UNITY_BUILD OFF)
+  set(CMAKE_AUTOMOC OFF)
+  set(CMAKE_AUTOUIC OFF)
+  set(CMAKE_AUTORCC OFF)
+  add_subdirectory("${score_essentia_fftw_SOURCE_DIR}" "${score_essentia_fftw_BINARY_DIR}"
+    EXCLUDE_FROM_ALL)
+  target_include_directories(fftw3f INTERFACE
+    "$<BUILD_INTERFACE:${score_essentia_fftw_SOURCE_DIR}/api>")
+  if(MSVC AND NOT CMAKE_C_COMPILER_ID STREQUAL "Intel")
+    # FFTW 3.3.10 adds /bigobj as a definition instead of a compiler option.
+    get_target_property(_definitions fftw3f COMPILE_DEFINITIONS)
+    list(REMOVE_ITEM _definitions /bigobj)
+    set_property(TARGET fftw3f PROPERTY COMPILE_DEFINITIONS "${_definitions}")
+    target_compile_options(fftw3f PRIVATE /bigobj)
   endif()
-  if(EXISTS "${_essentia_eigen_root}/Eigen/Version")
-    file(READ "${_essentia_eigen_root}/Eigen/Version" _eigen_version)
-    string(REGEX MATCH "EIGEN_VERSION_STRING[ \t]+\"([^\"]+)\"" _unused "${_eigen_version}")
-    set(_essentia_eigen_version "${CMAKE_MATCH_1}")
+endfunction()
+
+function(_score_add_essentia)
+  set(_patch "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/essentia-safety.patch")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_patch}")
+  if(SCORE_ESSENTIA_ROOT)
+    find_path(_include_dir algorithmfactory.h
+      PATHS "${SCORE_ESSENTIA_ROOT}/include/essentia" NO_DEFAULT_PATH NO_CACHE REQUIRED)
+    find_library(_library NAMES "${CMAKE_STATIC_LIBRARY_PREFIX}essentia${CMAKE_STATIC_LIBRARY_SUFFIX}"
+      PATHS "${SCORE_ESSENTIA_ROOT}/lib" "${SCORE_ESSENTIA_ROOT}/lib64"
+      NO_DEFAULT_PATH NO_CACHE REQUIRED)
+    set(_patch_header "${_include_dir}/score_essentia_patch_level.h")
+    if(NOT EXISTS "${_patch_header}")
+      message(FATAL_ERROR
+        "SCORE_ESSENTIA_ROOT must contain the score-patched DSP profile. "
+        "Unpatched upstream has unsafe Panning/YinFFT and invalid detector state. "
+        "Clear SCORE_ESSENTIA_ROOT to build the pinned patched dependency.")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_patch_header}")
+    file(SHA256 "${_patch}" _patch_sha)
+    file(READ "${_patch_header}" _patch_header_text)
+    if(NOT _patch_header_text MATCHES "#define SCORE_ESSENTIA_PATCH_LEVEL 1([\r\n]|$)"
+       OR NOT _patch_header_text MATCHES "#define SCORE_ESSENTIA_UPSTREAM_REVISION \"${SCORE_ESSENTIA_REVISION}\""
+       OR NOT _patch_header_text MATCHES "#define SCORE_ESSENTIA_PATCH_SHA256 \"${_patch_sha}\"")
+      message(FATAL_ERROR "Installed Essentia does not match this addon's reviewed revision and safety patch; rebuild it.")
+    endif()
+    add_library(score_essentia_native STATIC IMPORTED GLOBAL)
+    set_target_properties(score_essentia_native PROPERTIES IMPORTED_LOCATION "${_library}")
+    target_include_directories(score_essentia_native INTERFACE "${_include_dir}" "${_include_dir}/..")
+    set(_visibility INTERFACE)
   else()
-    file(READ "${_essentia_eigen_root}/Eigen/src/Core/util/Macros.h" _eigen_version)
-    foreach(_part WORLD MAJOR MINOR)
-      string(REGEX MATCH "EIGEN_${_part}_VERSION[ \t]+([0-9]+)" _unused "${_eigen_version}")
-      set(_eigen_${_part} "${CMAKE_MATCH_1}")
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    find_package(Git REQUIRED)
+    include(FetchContent)
+    if(SCORE_ESSENTIA_SOURCE_DIR)
+      file(REAL_PATH "${SCORE_ESSENTIA_SOURCE_DIR}" _source
+        BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    else()
+      FetchContent_Declare(score_essentia_source
+        URL "https://codeload.github.com/MTG/essentia/tar.gz/${SCORE_ESSENTIA_REVISION}"
+        URL_HASH SHA256=41d8ce1308b3471059c67f9e6c857a97e766dfb0b0b741cfedea6db624738c32
+        DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
+      FetchContent_MakeAvailable(score_essentia_source)
+      file(REAL_PATH "${score_essentia_source_SOURCE_DIR}" _source)
+    endif()
+    set(_src "${_source}/src")
+    set(_generated "${CMAKE_CURRENT_BINARY_DIR}/native/generated")
+    set(_patch_script "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patch_essentia.py")
+    set(_portability_patch "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/essentia-portability.patch")
+    set(_profile_script "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/generate_essentia_profile.py")
+    file(GLOB_RECURSE _algorithm_headers LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS "${_src}/algorithms/*.h")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      "${_patch_script}" "${_portability_patch}" "${_profile_script}"
+      "${_source}/VERSION" "${_source}/utils/algorithms_info.py" ${_algorithm_headers})
+    foreach(_patch_file IN ITEMS "${_patch}" "${_portability_patch}")
+      file(STRINGS "${_patch_file}" _patched_files REGEX "^\\+\\+\\+ b/")
+      foreach(_patched_file IN LISTS _patched_files)
+        string(SUBSTRING "${_patched_file}" 6 -1 _patched_path)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_source}/${_patched_path}")
+      endforeach()
     endforeach()
-    set(_essentia_eigen_version "${_eigen_WORLD}.${_eigen_MAJOR}.${_eigen_MINOR}")
-  endif()
-  if(NOT _essentia_eigen_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+")
-    message(FATAL_ERROR "Cannot determine the Eigen version used by Essentia")
-  endif()
-  set(_essentia_pc "${CMAKE_CURRENT_BINARY_DIR}/native/pkgconfig")
-  file(MAKE_DIRECTORY "${_essentia_pc}")
-  file(WRITE "${_essentia_pc}/eigen3.pc"
-    "Name: Eigen3\nDescription: Eigen headers provided by the host\nVersion: ${_essentia_eigen_version}\nCflags: -I${_essentia_eigen_root}\n")
-  set(_essentia_pc_path "${_essentia_pc}")
-  if(NOT "$ENV{PKG_CONFIG_PATH}" STREQUAL "")
-    string(APPEND _essentia_pc_path ":$ENV{PKG_CONFIG_PATH}")
-  endif()
-  set(_essentia_prefix "${CMAKE_CURRENT_BINARY_DIR}/native/install")
-  set(SCORE_ESSENTIA_INCLUDE_DIR "${_essentia_prefix}/include/essentia")
-  set(SCORE_ESSENTIA_LIBRARY "${_essentia_prefix}/lib/libessentia.a")
-  file(MAKE_DIRECTORY "${SCORE_ESSENTIA_INCLUDE_DIR}")
 
-  if(SCORE_ESSENTIA_SOURCE_DIR)
-    set(_essentia_download SOURCE_DIR "${SCORE_ESSENTIA_SOURCE_DIR}" DOWNLOAD_COMMAND "")
+    # A downloaded archive can sit under the enclosing score worktree. Do not
+    # let git apply discover that repository and skip the archive's paths.
+    get_filename_component(_source_parent "${_source}" DIRECTORY)
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" -E env "GIT_CEILING_DIRECTORIES=${_source_parent}"
+        "${Python3_EXECUTABLE}" -B "${_patch_script}" "${_source}" --git "${GIT_EXECUTABLE}"
+      RESULT_VARIABLE _patch_result OUTPUT_VARIABLE _patch_output ERROR_VARIABLE _patch_errors)
+    if(NOT _patch_result STREQUAL "0")
+      message(FATAL_ERROR "Could not patch Essentia (${_patch_result}):\n${_patch_output}${_patch_errors}")
+    endif()
+    file(MAKE_DIRECTORY "${_generated}")
+    execute_process(
+      COMMAND "${Python3_EXECUTABLE}" -B "${_profile_script}" "${_source}" "${_generated}"
+      RESULT_VARIABLE _profile_result OUTPUT_VARIABLE _profile_output ERROR_VARIABLE _profile_errors)
+    if(NOT _profile_result STREQUAL "0")
+      message(FATAL_ERROR "Could not generate the Essentia DSP profile (${_profile_result}):\n${_profile_output}${_profile_errors}")
+    endif()
+    include("${_generated}/sources.cmake")
+
+    # Same core and bundled helpers as Waf's --lightweight=fftw,libsamplerate.
+    file(GLOB_RECURSE _core LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS "${_src}/essentia/*.cpp")
+    list(FILTER _core EXCLUDE REGEX "/(audiocontext|jsonconvert|yamlast)\\.cpp$")
+    add_library(score_essentia_native STATIC
+      ${_core}
+      ${score_essentia_algorithm_sources}
+      "${_generated}/essentia_algorithms_reg.cpp"
+      "${_src}/3rdparty/spline/splineutil.cpp"
+      "${_src}/3rdparty/nnls/nnls.c"
+      "${_src}/3rdparty/cephes/bessel/gamma.cpp"
+      "${_src}/3rdparty/cephes/bessel/hyperg.cpp"
+      "${_src}/3rdparty/cephes/bessel/iv.cpp"
+      "${_src}/3rdparty/cephes/bessel/polevl.cpp")
+    set_target_properties(score_essentia_native PROPERTIES
+      CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF
+      POSITION_INDEPENDENT_CODE ON DISABLE_PRECOMPILE_HEADERS ON
+      UNITY_BUILD OFF AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+    target_include_directories(score_essentia_native
+      PUBLIC "${_generated}" "${_src}" "${_src}/essentia"
+      PRIVATE
+        "${_src}/essentia/scheduler" "${_src}/essentia/streaming"
+        "${_src}/essentia/streaming/algorithms" "${_src}/essentia/utils"
+        "${_src}/3rdparty" "${_src}/3rdparty/spline"
+        "${_src}/3rdparty/nnls" "${_src}/3rdparty/cephes/bessel")
+    target_compile_definitions(score_essentia_native PRIVATE
+      EIGEN_MPL2_ONLY EIGEN_PERMANENTLY_DISABLE_STUPID_WARNINGS)
+    if(MSVC)
+      target_compile_options(score_essentia_native PRIVATE
+        /W2 /bigobj /utf-8 $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
+      if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        target_compile_options(score_essentia_native PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/permissive->)
+      endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+      target_compile_options(score_essentia_native PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall>)
+    endif()
+    set(_visibility PUBLIC)
+  endif()
+
+  if(NOT TARGET Eigen3::Eigen)
+    find_package(Eigen3 QUIET CONFIG)
+    if(TARGET Eigen3::Eigen AND Eigen3_VERSION AND Eigen3_VERSION VERSION_LESS 3.3.4)
+      message(FATAL_ERROR "The Essentia DSP profile needs Eigen 3.3.4 or newer (found ${Eigen3_VERSION}).")
+    endif()
+  endif()
+  if(NOT TARGET SampleRate::samplerate)
+    find_package(SampleRate QUIET CONFIG)
+  endif()
+  if(NOT TARGET Eigen3::Eigen OR NOT TARGET SampleRate::samplerate)
+    find_package(PkgConfig REQUIRED)
+  endif()
+  set(_eigen Eigen3::Eigen)
+  if(NOT TARGET Eigen3::Eigen)
+    pkg_check_modules(SCORE_ESSENTIA_EIGEN REQUIRED IMPORTED_TARGET "eigen3>=3.3.4")
+    set(_eigen PkgConfig::SCORE_ESSENTIA_EIGEN)
+  endif()
+  set(_samplerate SampleRate::samplerate)
+  if(NOT TARGET SampleRate::samplerate)
+    pkg_check_modules(SCORE_ESSENTIA_SRC REQUIRED IMPORTED_TARGET samplerate)
+    set(_samplerate PkgConfig::SCORE_ESSENTIA_SRC)
+  endif()
+
+  if(TARGET FFTW3::fftw3f)
+    set(_fftw FFTW3::fftw3f)
+  elseif(TARGET fftw3f)
+    set(_fftw fftw3f)
   else()
-    set(_essentia_download
-      GIT_REPOSITORY https://github.com/MTG/essentia.git
-      GIT_TAG "${SCORE_ESSENTIA_REVISION}"
-      UPDATE_DISCONNECTED TRUE)
+    if(SCORE_ESSENTIA_ROOT)
+      set(_fftw_include_hints "${SCORE_ESSENTIA_ROOT}/include")
+      set(_fftw_library_hints "${SCORE_ESSENTIA_ROOT}/lib" "${SCORE_ESSENTIA_ROOT}/lib64")
+    endif()
+    find_path(SCORE_ESSENTIA_FFTW_INCLUDE_DIR fftw3.h HINTS ${_fftw_include_hints} NO_CACHE)
+    find_library(SCORE_ESSENTIA_FFTW_LIBRARY NAMES fftw3f fftw3f-3 libfftw3f-3
+      HINTS ${_fftw_library_hints} NO_CACHE)
+    if(SCORE_ESSENTIA_FFTW_INCLUDE_DIR AND SCORE_ESSENTIA_FFTW_LIBRARY)
+      add_library(score_essentia_fftw_system UNKNOWN IMPORTED)
+      set_target_properties(score_essentia_fftw_system PROPERTIES
+        IMPORTED_LOCATION "${SCORE_ESSENTIA_FFTW_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${SCORE_ESSENTIA_FFTW_INCLUDE_DIR}")
+      if(UNIX)
+        target_link_libraries(score_essentia_fftw_system INTERFACE m)
+      endif()
+      set(_fftw score_essentia_fftw_system)
+    else()
+      _score_essentia_build_fftw()
+      set(_fftw fftw3f)
+    endif()
   endif()
-  set(_essentia_env "${CMAKE_COMMAND}" -E env
-    "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}"
-    "PKG_CONFIG_PATH=${_essentia_pc_path}")
-  set(_essentia_arch)
-  if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
-    set(_essentia_arch --arch=arm64)
+  find_package(Threads REQUIRED)
+  target_link_libraries(score_essentia_native ${_visibility}
+    ${_eigen} ${_fftw} ${_samplerate} Threads::Threads)
+  target_compile_features(score_essentia_native ${_visibility} cxx_std_17)
+  target_compile_definitions(score_essentia_native ${_visibility} ESSENTIA_STATIC=1)
+  if(WIN32)
+    # Match the empty replacement in upstream config.h, including in headers
+    # that check OS_WIN32 before they reach config.h.
+    target_compile_definitions(score_essentia_native ${_visibility}
+      OS_WIN32= NOMINMAX WIN32_LEAN_AND_MEAN _USE_MATH_DEFINES)
   endif()
-  ExternalProject_Add(score_essentia_dependency
-    PREFIX "${CMAKE_CURRENT_BINARY_DIR}/native"
-    ${_essentia_download}
-    # Keep the empty argument out of _essentia_download: list expansion drops it.
-    # The audio and model test submodules are not part of the lightweight build.
-    GIT_SUBMODULES ""
-    BUILD_IN_SOURCE TRUE
-    PATCH_COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/patch_essentia.py"
-      <SOURCE_DIR> --git "${GIT_EXECUTABLE}"
-    CONFIGURE_COMMAND ${_essentia_env} "${Python3_EXECUTABLE}" <SOURCE_DIR>/waf configure
-      --build-static --lightweight=fftw,libsamplerate --std=c++17
-      --prefix=${_essentia_prefix} ${_essentia_arch}
-    BUILD_COMMAND ${_essentia_env} "${Python3_EXECUTABLE}" <SOURCE_DIR>/waf build
-      -j${SCORE_ESSENTIA_BUILD_JOBS}
-    INSTALL_COMMAND ${_essentia_env} "${Python3_EXECUTABLE}" <SOURCE_DIR>/waf install
-    BUILD_BYPRODUCTS "${SCORE_ESSENTIA_LIBRARY}")
-  ExternalProject_Add_StepDependencies(score_essentia_dependency patch
-    "${CMAKE_CURRENT_LIST_DIR}/patch_essentia.py"
-    "${CMAKE_CURRENT_LIST_DIR}/essentia-safety.patch")
-endif()
+  if(MSVC)
+    target_compile_options(score_essentia_native ${_visibility} $<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
+  endif()
+  if(EMSCRIPTEN)
+    # Match score's final link so Essentia exceptions can be caught by callers.
+    target_compile_options(score_essentia_native ${_visibility} $<$<COMPILE_LANGUAGE:CXX>:-fwasm-exceptions>)
+    target_link_options(score_essentia_native INTERFACE -fwasm-exceptions)
+  endif()
+endfunction()
 
-add_library(score_essentia_native STATIC IMPORTED GLOBAL)
-set_target_properties(score_essentia_native PROPERTIES
-  IMPORTED_LOCATION "${SCORE_ESSENTIA_LIBRARY}"
-  INTERFACE_INCLUDE_DIRECTORIES "${SCORE_ESSENTIA_INCLUDE_DIR};${SCORE_ESSENTIA_INCLUDE_DIR}/..")
-target_link_libraries(score_essentia_native INTERFACE
-  Eigen3::Eigen PkgConfig::SCORE_ESSENTIA_FFTW PkgConfig::SCORE_ESSENTIA_SRC Threads::Threads)
-if(TARGET score_essentia_dependency)
-  add_dependencies(score_essentia_native score_essentia_dependency)
-endif()
+_score_add_essentia()

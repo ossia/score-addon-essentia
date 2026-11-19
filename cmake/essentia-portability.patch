@@ -1,0 +1,127 @@
+--- a/src/essentia/config.h
++++ b/src/essentia/config.h
+@@ -198,7 +198,9 @@
+ 
+ // define ESSENTIA_EXPORTS when building the DLL, don't when importing it
+ // into your application.
+-#if ESSENTIA_EXPORTS
++#if defined(OS_WIN32) && defined(ESSENTIA_STATIC)
++#  define ESSENTIA_API
++#elif ESSENTIA_EXPORTS
+ #  define ESSENTIA_API ESSENTIA_DLLEXPORT
+ #else
+ #  define ESSENTIA_API ESSENTIA_DLLIMPORT
+--- a/src/essentia/essentiautil.cpp
++++ b/src/essentia/essentiautil.cpp
+@@ -21,7 +21,8 @@
+ 
+ #ifdef OS_WIN32
+ #include <fcntl.h>
+-#include <io.h> // _mktemp
++#include <io.h> // _mktemp, _open
++#include <sys/stat.h> // _S_IREAD, _S_IWRITE
+ #endif // OS_WIN32
+ 
+ using namespace std;
+@@ -29,13 +30,11 @@
+ namespace essentia {
+ 
+ #ifdef OS_WIN32
+-#define _S_IREAD 256
+-#define _S_IWRITE 128
+ int mkstemp(char *tmpl) {
+   int ret=-1;
+ 
+   _mktemp(tmpl);
+-  ret=open(tmpl,O_RDWR|O_BINARY|O_CREAT|O_EXCL|_O_SHORT_LIVED, _S_IREAD|_S_IWRITE);
++  ret=_open(tmpl,_O_RDWR|_O_BINARY|_O_CREAT|_O_EXCL|_O_SHORT_LIVED, _S_IREAD|_S_IWRITE);
+   return ret;
+ }
+ #endif // OS_WIN32
+--- a/src/essentia/roguevector.h
++++ b/src/essentia/roguevector.h
+@@ -56,8 +56,28 @@
+   void setSize(size_t size);
+ };
+ 
+-// Clang/LLVM implementation
+-#if defined(__clang__) || defined(__EMSCRIPTEN__)
++// Microsoft STL (including clang-cl). Preserve the iterator proxy in Debug.
++#if defined(_MSVC_STL_VERSION)
++
++template <typename T>
++void RogueVector<T>::setData(T* data) {
++  using Storage = std::_Vector_val<std::_Simple_types<T>>;
++  static_assert(sizeof(std::vector<T>) == sizeof(Storage) &&
++                alignof(std::vector<T>) == alignof(Storage),
++                "RogueVector requires the Microsoft STL vector storage layout");
++  auto& storage = reinterpret_cast<Storage&>(static_cast<std::vector<T>&>(*this));
++  storage._Myfirst = data;
++}
++
++template <typename T>
++void RogueVector<T>::setSize(size_t size) {
++  using Storage = std::_Vector_val<std::_Simple_types<T>>;
++  auto& storage = reinterpret_cast<Storage&>(static_cast<std::vector<T>&>(*this));
++  storage._Mylast = storage._Myend = storage._Myfirst + size;
++}
++
++// libc++ implementation
++#elif defined(_LIBCPP_VERSION)
+ 
+ // TODO: this is a big hack that relies on clang/libcpp not changing the memory
+ //       layout of the std::vector (very dangerous, but works for now...)
+@@ -72,8 +92,8 @@
+     *(start+2) = *start + size;
+ }
+ 
+-// Linux implementation
+-#elif defined(OS_LINUX) || defined(OS_MINGW)
++// libstdc++ implementation (including MinGW).
++#elif defined(__GLIBCXX__)
+ 
+ template <typename T>
+ void RogueVector<T>::setData(T* data) { this->_M_impl._M_start = data; }
+@@ -84,20 +104,6 @@
+   this->_M_impl._M_end_of_storage = this->_M_impl._M_start + size;
+ }
+ 
+-// Windows implementation
+-#elif defined(OS_WIN32)
+-
+-template <typename T>
+-void RogueVector<T>::setData(T* data) {
+-  this->_Myfirst() = data;
+-}
+-
+-template <typename T>
+-void RogueVector<T>::setSize(size_t size) {
+-  this->_Mylast() = this->_Myfirst() + size;
+-  this->_Myend() = this->_Myfirst() + size;
+-}
+-
+ #endif
+ 
+ } // namespace essentia
+--- a/src/essentia/streaming/phantombuffer_impl.h
++++ b/src/essentia/streaming/phantombuffer_impl.h
+@@ -142,7 +142,7 @@
+   else if (_writeWindow.end > _bufferSize) {
+     int beginIdx = (std::max)(_writeWindow.begin, (int)_bufferSize);
+     T* first  = &_buffer[beginIdx];
+-    T* last   = &_buffer[_writeWindow.end];
++    T* last   = _buffer.data() + _writeWindow.end;
+     T* result = &_buffer[beginIdx - _bufferSize];
+     fastcopy(result, first, last-first);
+   }
+--- a/src/essentia/utils/atomic.h
++++ b/src/essentia/utils/atomic.h
+@@ -21,7 +21,7 @@
+ #define ESSENTIA_ATOMIC_H
+ 
+ 
+-#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+ 
+ namespace essentia {
+ 

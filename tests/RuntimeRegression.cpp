@@ -111,7 +111,7 @@ void require(bool condition, const char* message)
   if(!condition)
     throw std::runtime_error(message);
 }
-bool near(double a, double b)
+bool approximatelyEqual(double a, double b)
 {
   return std::isfinite(a) && std::abs(a - b) <= 1e-10;
 }
@@ -308,17 +308,17 @@ void expect(const Node& node, std::size_t index, double sum, double energy, int 
   require(index < node.count, "expected window is absent");
   const auto& result = node.results[index];
   require(
-      near(result.sum, sum) && near(result.energy, energy),
+      approximatelyEqual(result.sum, sum) && approximatelyEqual(result.energy, energy),
       "window samples differ from the expected sum or energy");
   require(
-      near(result.endTime, double(end) / rate),
+      approximatelyEqual(result.endTime, double(end) / rate),
       "processor received the wrong source time");
 }
 template <typename Node>
 void expectTime(const Node& node, int end)
 {
   require(
-      near(node.outputs.time.value, double(end) / rate),
+      approximatelyEqual(node.outputs.time.value, double(end) / rate),
       "published analysis time is incorrect");
 }
 
@@ -493,7 +493,8 @@ void dataSeek()
   gate.release();
   awaitCount(node, 1);
   require(
-      near(node.results[0].sum, 150.) && near(node.results[0].energy, 5500.),
+      approximatelyEqual(node.results[0].sum, 150.)
+          && approximatelyEqual(node.results[0].energy, 5500.),
       "data seek did not publish the post-seek vector");
   require(node.outputs.dropped.value >= 1, "data seek published a pre-seek result");
   poll(node);
@@ -506,7 +507,8 @@ void dataSeek()
   if(node.count < 2)
     awaitCount(node, 2);
   require(
-      near(node.results[1].sum, 10.) && near(node.results[1].energy, 20.),
+      approximatelyEqual(node.results[1].sum, 10.)
+          && approximatelyEqual(node.results[1].energy, 20.),
       "next data vector was not processed independently");
 }
 
