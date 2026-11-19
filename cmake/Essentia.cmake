@@ -95,7 +95,6 @@ else()
     set(_essentia_download
       GIT_REPOSITORY https://github.com/MTG/essentia.git
       GIT_TAG "${SCORE_ESSENTIA_REVISION}"
-      GIT_SUBMODULES ""
       UPDATE_DISCONNECTED TRUE)
   endif()
   set(_essentia_env "${CMAKE_COMMAND}" -E env
@@ -108,6 +107,9 @@ else()
   ExternalProject_Add(score_essentia_dependency
     PREFIX "${CMAKE_CURRENT_BINARY_DIR}/native"
     ${_essentia_download}
+    # Keep the empty argument out of _essentia_download: list expansion drops it.
+    # The audio and model test submodules are not part of the lightweight build.
+    GIT_SUBMODULES ""
     BUILD_IN_SOURCE TRUE
     PATCH_COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/patch_essentia.py"
       <SOURCE_DIR> --git "${GIT_EXECUTABLE}"
