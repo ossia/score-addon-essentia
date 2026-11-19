@@ -1,0 +1,10 @@
+{
+  "name": "Essentia analysis",
+  "raw_name": "score_addon_essentia",
+  "version": "1",
+  "kind": "addon",
+  "short": "Windowed audio, tonal, statistical and quality analysis",
+  "long": "46 analysis processes backed by a pinned, safety-patched Essentia DSP build. Fixed analysis windows and bounded serial workers separate native DSP from audio callbacks. Includes filterbanks, cepstra, spectral shape, chroma, key, tuning, harmonics, LPC, correlation, envelopes and live defect detectors.",
+  "key": "203cc2b8-51a4-4c03-832d-a781996ff074",
+  "license": "AGPL-3.0-or-later"
+}

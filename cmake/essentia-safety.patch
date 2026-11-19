@@ -1,0 +1,279 @@
+--- a/src/algorithms/spectral/panning.cpp
++++ b/src/algorithms/spectral/panning.cpp
+@@ -73,7 +73,8 @@
+   }
+ 
+   for(int i = 0; i < (int)subRatios.size(); i++) {
+-    index = int(floor(_panningBins * subRatios[i]));
++    index = std::max(0, std::min(_panningBins - 1,
++                                int(floor(_panningBins * subRatios[i]))));
+     histogram[index] += subL[i] + subR[i];
+   }
+ }
+--- a/src/algorithms/tonal/pitchyinfft.cpp
++++ b/src/algorithms/tonal/pitchyinfft.cpp
+@@ -30,9 +30,6 @@
+ 	1600., 2000., 2500., 3150., 4000., 5000., 6300., 8000., 9000., 10000.,
+ 	12500., 15000., 20000.,  25100};
+ 
+-static Real _weightMask[] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+ 
+ static const Real _weights[] = {-75.8, -70.1, -60.8, -52.1, -44.2, -37.5,
+ 	-31.3, -25.6, -20.9, -16.5, -12.6, -9.6, -7.0, -4.7, -3.0, -1.8, -0.8,
+@@ -115,54 +112,29 @@
+ }
+ 
+ void PitchYinFFT::spectralWeights(std::string weighting) {
+-  int i = 0, j = 1;
+-  Real freq = 0, a0 = 0, a1 = 0, f0 = 0, f1 = 0;
+-  int _maskSize = 34;
+-  if (weighting == "custom") {
+-    for (int n=0; n<_maskSize; n++)
+-      _weightMask[n] = _weights[n];
+-  }
+-  else if (weighting == "A") {
+-    for (int n=0; n<_maskSize; n++)
+-      _weightMask[n] = _aWeighting[n];
+-  }
+-  else if (weighting == "B") {
+-    for (int n=0; n<_maskSize; n++)
+-      _weightMask[n] = _bWeighting[n];
+-  }
+-  else if (weighting == "C") {
+-    for (int n=0; n<_maskSize; n++)
+-      _weightMask[n] = _cWeighting[n];
+-  }
+-  else if (weighting == "D") {
+-    for (int n=0; n<_maskSize; n++)
+-      _weightMask[n] = _dWeighting[n];
+-  }
+-    
+-  for (i=0; i < int(_weight.size()); ++i) {
+-    freq = (Real)i/(Real)_frameSize*_sampleRate;
+-    while (freq > _freqsMask[j]) {
+-      j +=1;
+-    }
+-    a0 = _weightMask[j-1];
+-    f0 = _freqsMask[j-1];
+-    a1 = _weightMask[j];
+-    f1 = _freqsMask[j];
+-    if (f0 == f1) { // just in case
+-      _weight[i] = a0;
+-    }
+-    else if (f0 == 0) { // y = ax+b
+-      _weight[i] = (a1-a0)/f1*freq + a0;
++  const Real* weights = _zWeighting;
++  if (weighting == "custom") weights = _weights;
++  else if (weighting == "A") weights = _aWeighting;
++  else if (weighting == "B") weights = _bWeighting;
++  else if (weighting == "C") weights = _cWeighting;
++  else if (weighting == "D") weights = _dWeighting;
++
++  const int maskSize = sizeof(_freqsMask) / sizeof(_freqsMask[0]);
++  int j = 1;
++  for (int i = 0; i < int(_weight.size()); ++i) {
++    const Real freq = Real(i) / Real(_frameSize) * _sampleRate;
++    while (j < maskSize - 1 && freq > _freqsMask[j]) ++j;
++    Real weight;
++    if (freq >= _freqsMask[maskSize - 1]) {
++      // The tabulated curve ends at 25.1 kHz. Hold its last value above it.
++      weight = weights[maskSize - 1];
+     }
+     else {
+-      _weight[i] = (a1-a0)/(f1-f0)*freq +
+-        (a0 - (a1 - a0)/(f1/f0 - 1.));
+-    }
+-    while (freq > _freqsMask[j]) {
+-      j +=1;
+-    }
+-    // could be sqrt of this too
+-    _weight[i] = db2lin(_weight[i]/2.0);
++      const Real fraction = (freq - _freqsMask[j - 1]) /
++                            (_freqsMask[j] - _freqsMask[j - 1]);
++      weight = weights[j - 1] + fraction * (weights[j] - weights[j - 1]);
++    }
++    _weight[i] = db2lin(weight / 2.0);
+   }
+ }
+ 
+--- a/src/algorithms/standard/silencerate.h
++++ b/src/algorithms/standard/silencerate.h
+@@ -39,7 +39,7 @@
+     declareInput(_frame, "frame", "the input frame");
+   }
+ 
+-  ~SilenceRate() {}
++  ~SilenceRate() { clearOutputs(); }
+ 
+   void declareParameters() {
+     declareParameter("thresholds", "the threshold values", "", std::vector<Real>());
+--- a/src/algorithms/audioproblems/snr.cpp
++++ b/src/algorithms/audioproblems/snr.cpp
+@@ -141,7 +141,7 @@
+     for (uint i = 0; i < _specSize; i++)
+       _XPsdEst[i] = _noisePsd[i] * snrPrior[i];
+ 
+-    _snrAverage = mean(_XPsdEst) / mean(_noisePsd);
++    _snrAverage = mean(_XPsdEst) / std::max(mean(_noisePsd), _eps);
+ 
+     // An Exponenitial Moving Average filtered version is also returned.
+     UpdateEMA(_alphaEma, _snrAverageEma, _snrAverage);
+@@ -184,7 +184,7 @@
+                       std::vector<Real> noisePsd,
+                       std::vector<Real> snrInst) {
+   for (uint i = 0; i < _specSize; i++) {
+-    snrPrior[i] = alpha * pow(mmse[i], 2.f) / noisePsd[i] +
++    snrPrior[i] = alpha * pow(mmse[i], 2.f) / std::max(noisePsd[i], _eps) +
+                   (1 - alpha) * std::max(snrInst[i], 0.f);
+     if (snrPrior[i] == 0.f)
+       snrPrior[i] += _eps;
+@@ -196,7 +196,7 @@
+                 std::vector<Real> noisePsd,
+                 std::vector<Real> Y) {
+   for (uint i = 0; i < _specSize; i++) {
+-    snrPost[i] = pow(Y[i], 2.f) / noisePsd[i];
++    snrPost[i] = pow(Y[i], 2.f) / std::max(noisePsd[i], _eps);
+     if (snrPost[i] == 0.f)
+       snrPost[i] += _eps;
+     }
+@@ -226,10 +226,10 @@
+ 
+   for (uint i = 0; i < _specSize; i++) {
+     if (v[i] > 10.f) {
+-      mmse[i] = v[i] * Y[i] / snrPost[i];
++      mmse[i] = v[i] * Y[i] / std::max(snrPost[i], _eps);
+     }
+     else {
+-      mmse[i] = g * (sqrt(v[i]) / snrPost[i]) * 
++      mmse[i] = g * (sqrt(v[i]) / std::max(snrPost[i], _eps)) *
+                 exp(-v[i] / 2.f) * 
+                 ((1 + v[i]) * cephes::iv(0.f, v[i] / 2.f) +
+                 v[i] * cephes::iv(1.f, v[i] / 2.f)) * Y[i];
+@@ -266,6 +266,7 @@
+   _XPsdEst.assign(_specSize, 0.f);
+ 
+   _snrAverageEma = 0.f;
++  _snrAverage = 0.f;
+ 
+   _windowing->configure("size", _frameSize,
+                         "type", "hann",
+--- a/src/essentia/essentiamath.h
++++ b/src/essentia/essentiamath.h
+@@ -1240,7 +1240,7 @@
+   T yStddev = stddev(y, yMean);
+ 
+   // When dealing with constants corraltion is 0 by convention. 
+-  if ((xStddev == (T)0.0) || (xStddev == (T)0.0) || (xStddev == (T)0.0)) return (T) 0.0;
++  if ((xStddev == (T)0.0) || (yStddev == (T)0.0)) return (T) 0.0;
+   
+   T corr = cov / (xStddev * yStddev);
+ 
+--- a/src/algorithms/standard/welch.cpp
++++ b/src/algorithms/standard/welch.cpp
+@@ -70,7 +70,7 @@
+ 
+   _psdBuffer.assign(_averagingFrames, vector<Real>(_spectSize, 0.f));
+ 
+-  vector<Real> ones( _fftSize, 1.f);
++  vector<Real> ones(_frameSize, 1.f);
+   _window->input("frame").set(ones);
+   _window->compute();
+ 
+--- a/src/algorithms/spectral/triangularbarkbands.cpp
++++ b/src/algorithms/spectral/triangularbarkbands.cpp
+@@ -139,9 +139,9 @@
+                 bands[i] += (spectrum[j]) * _filterCoefficients[i][j];
+             }
+             
+-            if (_isLog)
+-                bands[i] = log2(1 + bands[i]);
+         }
++        if (_isLog)
++            bands[i] = log2(1 + bands[i]);
+     }
+ }
+ 
+--- a/src/algorithms/standard/startstopsilence.cpp
++++ b/src/algorithms/standard/startstopsilence.cpp
+@@ -40,25 +40,17 @@
+   int& start = _startSilenceSource.get();
+   int& stop = _stopSilenceSource.get();
+ 
+-  // should output the first non-silent frame, thus:
+-  if (_wasSilent) {
+-    _startSilence++;
+-    _wasSilent = false;
+-  }
+-
+-  bool silentFrame = instantPower(frame) < _threshold;
+-  if (silentFrame && (_stopSilence == _startSilence)) {
+-    _startSilence = _nFrame;
+-    _wasSilent = true;
+-  }
+-
++  const bool silentFrame = instantPower(frame) < _threshold;
+   if (!silentFrame) {
++    if (_wasSilent) {
++      _startSilence = _nFrame;
++      _wasSilent = false;
++    }
+     _stopSilence = _nFrame;
+   }
+-
+-
+-  if (_startSilence > _stopSilence) {
+-    _stopSilence = _startSilence;
++  else if (_wasSilent) {
++    // Until the first sound, retain the existing no-sound frame convention.
++    _startSilence = _stopSilence = _nFrame;
+   }
+ 
+   start = _startSilence;
+@@ -70,7 +62,7 @@
+   _startSilence = 0;
+   _stopSilence = 0;
+   _nFrame = 0;
+-  _wasSilent = false;
++  _wasSilent = true;
+ }
+ 
+ } // essentia standard
+--- a/src/algorithms/audioproblems/gapsdetector.cpp
++++ b/src/algorithms/audioproblems/gapsdetector.cpp
+@@ -193,16 +193,16 @@
+     for (uint i = 0; i < uFlanks.size(); i++) {
+       uint remaining =
+           std::max((int)(_postpowerSamples + uFlanks[i] - _frameSize), 0);
++      const Real endTime = (Real)((offset + uFlanks[i]) / _sampleRate);
+       for (uint j = 0; j < _gaps.size(); j++) {
+-        if (_gaps[j].active) {
++        if (_gaps[j].active && _gaps[j].start <= endTime) {
+           _gaps[j].active = false;
+-          _gaps[j].end = (Real)((offset + uFlanks[i]) / _sampleRate);
++          _gaps[j].end = endTime;
+           _gaps[j].remaining = remaining;
+           uint last = std::min(_frameSize, uFlanks[i] + _postpowerSamples);
+-          std::vector<Real> rBuffer(last - uFlanks[i], 0.f);
+           uint l = 0;
+-          _gaps[j].rBuffer.resize(_frameSize - uFlanks[i]);
+-          for (uint k = uFlanks[i]; k < _frameSize; k++, l++)
++          _gaps[j].rBuffer.resize(last - uFlanks[i]);
++          for (uint k = uFlanks[i]; k < last; k++, l++)
+             _gaps[j].rBuffer[l] = frame[k];
+           break;
+         }
+--- a/src/algorithms/audioproblems/falsestereodetector.h
++++ b/src/algorithms/audioproblems/falsestereodetector.h
+@@ -45,6 +45,10 @@
+     declareOutput(_isFalseStereo, "isFalseStereo", "a flag indicating if the frame channes are simmilar");
+     declareOutput(_correlation, "correlation", "correlation betweeen the input channels");
+     _demuxer = AlgorithmFactory::create("StereoDemuxer");
++  }
++
++  ~FalseStereoDetector() {
++    delete _demuxer;
+   }
+ 
+   void declareParameters() {
