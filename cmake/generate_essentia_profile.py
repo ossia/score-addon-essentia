@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the native CMake sources for Essentia's FFTW/libsamplerate profile."""
+"""Generate the native CMake sources for Essentia's libossia/libsamplerate profile."""
 import argparse
 from contextlib import redirect_stdout
 from io import StringIO
@@ -7,8 +7,8 @@ from pathlib import Path
 import sys
 
 
-# Mirrors ALGOIGNORE in the pinned src/wscript for --lightweight=fftw,libsamplerate
-# with the default FFT backend and no optional integrations.
+# Keep the pinned Waf lightweight registry without optional integrations.
+# The patch retains the original FFTW registry classes but uses libossia in them.
 EXCLUDED = {
     # Other FFT implementations
     "FFTK", "IFFTK", "FFTKComplex", "IFFTKComplex",

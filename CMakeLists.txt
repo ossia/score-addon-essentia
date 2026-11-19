@@ -105,7 +105,7 @@ avnd_addon_finalize(NAME score_addon_essentia
 if(COMMAND score_register_license)
   score_register_license(Essentia
     URL "https://essentia.upf.edu"
-    HEADER "Essentia 2.1-beta6-dev, MTG / Universitat Pompeu Fabra; AGPL-3.0-or-later. Native fixes are distributed in cmake/essentia-safety.patch and cmake/essentia-portability.patch."
+    HEADER "Essentia 2.1-beta6-dev, MTG / Universitat Pompeu Fabra; AGPL-3.0-or-later. The libossia FFT adaptation and native fixes are distributed in cmake/essentia-ossia-fft.patch, cmake/essentia-safety.patch and cmake/essentia-portability.patch."
     FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 endif()
 
